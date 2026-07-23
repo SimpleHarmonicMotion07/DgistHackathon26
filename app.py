@@ -22,7 +22,11 @@ if "match_type" not in st.session_state:
 if "ai_cards_data" not in st.session_state:
     st.session_state.ai_cards_data = []
 if "ai_raw_text" not in st.session_state:
-    st.session_state.ai_raw_text = ""
+    st.session_state.ai_raw_text = []
+if "ugrp_ai_cards_data" not in st.session_state:
+    st.session_state.ugrp_ai_cards_data = []
+if "ugrp_ai_raw_text" not in st.session_state:
+    st.session_state.ugrp_ai_raw_text = ""
 
 
 # 2. DB 연결 함수
@@ -93,7 +97,6 @@ theme_css = """
         color: #FFFFFF;
     }
 
-    /* 결과 카드 디자인 (5개 병렬 배치용) */
     div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
         background-color: #F8FAFC !important;
         border: 1.5px solid #CBD5E1 !important;
@@ -175,17 +178,447 @@ def show_home():
             st.rerun()
 
 
-# --- 2. UGRP 탐색 화면 ---
+# --- 2. UGRP 탐색 및 AI 추천 화면 ---
+@st.cache_data(show_spinner=False)
+def get_ugrp_ai_recommendation_cached(my_team_str, other_teams_str, api_key):
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-3.5-flash-lite")
+    prompt = f"""
+    당신은 DGIST UGRP(Undergraduate Group Research Program) 연구팀 매칭 전문가 AI입니다.
+    아래는 현재 로그인한 사용자의 '우리 팀' 정보 및 팀 PR입니다:
+    {my_team_str}
+
+    아래는 데이터베이스에 등록된 '다른 팀들'의 정보 목록입니다 (합병 시 총인원이 6명을 넘지 않는 팀들만 엄선됨):
+    {other_teams_str}
+
+    조건:
+    1. 우리 팀의 연구 주제와 팀 PR, 다른 팀들의 연구 방향과 팀 PR을 종합적으로 비교하여 가장 연구 시너지가 잘 맞고 합병하기 좋은 상위 다른 팀(팀장 ID 기준)을 최대 5개 선정해주세요.
+    2. 각 추천 팀별 출력 포맷은 반드시 아래와 같이 한 줄씩 작성해주세요:
+    [팀장닉네임/이름] [팀장아이디/이메일] [추천 및 합병 시너지 이유 요약]
+    예시: 홍길동 leader1@dgist.ac.kr AI 기반 헬스케어 주제가 일치하며 인원 합병 시 완벽한 시너지가 기대됩니다.
+    """
+    response = model.generate_content(prompt)
+    return response.text
+
+
 def show_ugrp_search():
-    st.markdown(theme_css, unsafe_allow_html=True)
-    st.title("🔬 UGRP 매칭 시스템")
-    st.write(
-        "성공적인 UGRP를 위해, 나의 정보를 등록하고 원하는 팀원/리더를"
-        " 찾아보세요!"
+    st.title("🔬 DGIST UGRP 팀원 모집 및 AI 매칭 시스템")
+    st.info("팀장 본인을 포함하여 함께 연구할 팀원들의 정보를 입력하고 저장하거나, 인원 제한(합산 최대 6명)을 만족하는 최적의 다른 연구팀을 AI로 추천받으세요!")
+
+    try:
+        conn, users_db = get_database()
+        if users_db is None or users_db.empty:
+            st.error("회원 데이터베이스를 불러올 수 없습니다.")
+            return
+        registered_emails = users_db["id"].astype(str).tolist()
+    except Exception as e:
+        st.error(f"구글 시트 연결 실패: {e}")
+        return
+
+    leader_id = st.session_state.get("id", "user@dgist.ac.kr")
+    leader_name_default = st.session_state.get("username", "홍길동")
+
+    track_options = ["물리", "화학", "생명", "뇌", "기계", "재료", "전자", "컴퓨터", "화공", "자율"]
+    time_options = ["0~5시간", "5~10시간", "10~15시간", "15~20시간 이상"]
+    gender_options = ["남", "여"]
+    l_pg_options = ["남", "여", "상관없음"]
+
+    saved_team_rows = []
+    try:
+        df_ugrp_existing = conn.read(worksheet="UGRP_DB", ttl=0)
+        if df_ugrp_existing is not None and not df_ugrp_existing.empty and "id" in df_ugrp_existing.columns:
+            my_team_df = df_ugrp_existing[df_ugrp_existing["id"] == leader_id]
+            if not my_team_df.empty:
+                saved_team_rows = my_team_df.sort_values(by="member_index").to_dict(orient="records")
+    except Exception:
+        pass
+
+    default_num_members = max(0, len(saved_team_rows) - 1) if saved_team_rows else 1
+
+    num_members = st.slider(
+        "추가 팀원 수 선택 (본인 제외, 최대 4명)",
+        min_value=0, max_value=4,
+        value=default_num_members,
+        step=1,
+        key="num_members_slider"
     )
+
+    with st.form("ugrp_form"):
+        team_members_data = []
+
+        leader_saved = saved_team_rows[0] if saved_team_rows and len(saved_team_rows) > 0 else {}
+
+        st.markdown(f"### 👑 1번 멤버 (팀장 본인: {leader_name_default})")
+        col_l1, col_l2 = st.columns(2)
+        with col_l1:
+            l_g_val = leader_saved.get("gender", "남")
+            l_g_idx = gender_options.index(l_g_val) if l_g_val in gender_options else 0
+            leader_gender = st.selectbox("성별", gender_options, index=l_g_idx, key="leader_gender")
+        with col_l2:
+            l_t_val = leader_saved.get("track", track_options[0])
+            l_t_idx = track_options.index(l_t_val) if l_t_val in track_options else 0
+            leader_track = st.selectbox("트랙", track_options, index=l_t_idx, key="leader_track")
+
+        leader_topic = st.text_input("희망 연구 분야 및 주제 방향성", value=str(leader_saved.get("topic", "")),
+                                     placeholder="예: AI 기반 헬스케어 데이터 분석", key="leader_topic")
+
+        l_time_val = leader_saved.get("available_time", time_options[0])
+        l_time_idx = time_options.index(l_time_val) if l_time_val in time_options else 0
+        leader_time = st.selectbox("주당 투자 가능 시간", time_options, index=l_time_idx, key="leader_time")
+
+        col_lp1, col_lp2 = st.columns(2)
+        with col_lp1:
+            l_pg_val = leader_saved.get("pref_gender", "상관없음")
+            l_pg_idx = l_pg_options.index(l_pg_val) if l_pg_val in l_pg_options else 2
+            leader_pref_gender = st.selectbox("선호하는 팀원 성별", l_pg_options, index=l_pg_idx, key="leader_pref_gender")
+        with col_lp2:
+            saved_l_tracks = str(leader_saved.get("preferred_tracks", "")).split(",")
+            default_l_tracks = [t.strip() for t in saved_l_tracks if t.strip() in track_options]
+            leader_pref_tracks = st.multiselect("선호하는 트랙 (복수 선택)", track_options, default=default_l_tracks,
+                                                key="leader_pref_tracks")
+
+        leader_pr = st.text_area("개인 자기 PR", value=str(leader_saved.get("pr", "")), placeholder="예: 팀장으로서 열심히 이끌겠습니다!",
+                                 key="leader_pr")
+        st.markdown("---")
+
+        team_emails_input = []
+        for i in range(num_members):
+            st.markdown(f"### 👤 {i + 2}번 멤버 정보")
+            member_saved = saved_team_rows[i + 1] if saved_team_rows and (i + 1) < len(saved_team_rows) else {}
+
+            col_m1, col_m2, col_m3 = st.columns(3)
+
+            with col_m1:
+                m_email = st.text_input(f"팀원 이메일 (아이디)", value=str(member_saved.get("member_email", "")),
+                                        placeholder=f"member{i + 1}@dgist.ac.kr", key=f"m_email_{i}")
+                team_emails_input.append(m_email.strip())
+            with col_m2:
+                m_g_val = member_saved.get("gender", "남")
+                m_g_idx = gender_options.index(m_g_val) if m_g_val in gender_options else 0
+                m_gender = st.selectbox(f"성별", gender_options, index=m_g_idx, key=f"m_gender_{i}")
+            with col_m3:
+                m_t_val = member_saved.get("track", track_options[0])
+                m_t_idx = track_options.index(m_t_val) if m_t_val in track_options else 0
+                m_track = st.selectbox(f"트랙", track_options, index=m_t_idx, key=f"m_track_{i}")
+
+            m_topic = st.text_input(f"희망 연구 분야 및 주제 방향성", value=str(member_saved.get("topic", "")),
+                                    placeholder="관심 연구 방향", key=f"m_topic_{i}")
+
+            m_time_val = member_saved.get("available_time", time_options[0])
+            m_time_idx = time_options.index(m_time_val) if m_time_val in time_options else 0
+            m_time = st.selectbox(f"주당 투자 가능 시간", time_options, index=m_time_idx, key=f"m_time_{i}")
+
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                m_pg_val = member_saved.get("pref_gender", "상관없음")
+                m_pg_idx = l_pg_options.index(m_pg_val) if m_pg_val in l_pg_options else 2
+                m_pref_gender = st.selectbox(f"선호하는 팀원 성별", l_pg_options, index=m_pg_idx, key=f"m_pref_gender_{i}")
+            with col_p2:
+                saved_m_tracks = str(member_saved.get("preferred_tracks", "")).split(",")
+                default_m_tracks = [t.strip() for t in saved_m_tracks if t.strip() in track_options]
+                m_pref_tracks = st.multiselect(f"선호하는 트랙 (복수 선택)", track_options, default=default_m_tracks,
+                                               key=f"m_pref_tracks_{i}")
+
+            m_pr = st.text_area(f"개인 자기 PR", value=str(member_saved.get("pr", "")), placeholder="예: 코딩에 자신이 있습니다.",
+                                key=f"m_pr_{i}")
+
+            st.markdown("---")
+
+            team_members_data.insert(i + 1, {
+                "id": leader_id,
+                "leader_name": leader_name_default,
+                "member_index": i + 2,
+                "member_email": m_email.strip(),
+                "gender": m_gender,
+                "track": m_track,
+                "topic": m_topic,
+                "available_time": m_time,
+                "pref_gender": m_pref_gender,
+                "preferred_tracks": ", ".join(m_pref_tracks),
+                "pr": m_pr,
+                "team_pr": ""
+            })
+
+        st.markdown("### 🏆 팀 전체 PR (팀 소개 및 각오)")
+        is_team_pr_disabled = (num_members == 0)
+        if is_team_pr_disabled:
+            st.warning("⚠️ 추가 팀원이 0명이므로 팀 PR을 작성하실 수 없습니다.")
+
+        default_team_pr = leader_saved.get("team_pr", "") if leader_saved else ""
+        team_pr_input = st.text_area(
+            "팀 PR (예: 열심히 하시는 분 오시면 좋겠습니다)",
+            value=str(default_team_pr),
+            placeholder="우리 팀과 함께 열정을 불태울 팀원을 기다립니다!",
+            disabled=is_team_pr_disabled,
+            key="team_pr_input"
+        )
+
+        team_members_data.insert(0, {
+            "id": leader_id,
+            "leader_name": leader_name_default,
+            "member_index": 1,
+            "member_email": leader_id,
+            "gender": leader_gender,
+            "track": leader_track,
+            "topic": leader_topic,
+            "available_time": leader_time,
+            "pref_gender": leader_pref_gender,
+            "preferred_tracks": ", ".join(leader_pref_tracks),
+            "pr": leader_pr,
+            "team_pr": "" if is_team_pr_disabled else team_pr_input
+        })
+
+        for data in team_members_data:
+            data["team_pr"] = "" if is_team_pr_disabled else team_pr_input
+
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            submitted = st.form_submit_button("💾 UGRP 팀 정보 저장하기", use_container_width=True)
+        with btn_col2:
+            ugrp_match_clicked = st.form_submit_button("🔍 UGRP 팀 추천받기 (AI)", use_container_width=True)
+
+        def process_ugrp_save():
+            has_empty_field = False
+            for idx, member in enumerate(team_members_data):
+                if idx > 0 and not member.get("member_email"):
+                    has_empty_field = True
+                    break
+                if not member.get("topic") or not member.get("pr"):
+                    has_empty_field = True
+                    break
+
+            if has_empty_field or (not is_team_pr_disabled and not team_pr_input.strip()):
+                return "empty_error"
+
+            invalid_emails = [email for email in team_emails_input if email and email not in registered_emails]
+            if invalid_emails:
+                return f"invalid_email:{', '.join(invalid_emails)}"
+
+            already_in_other_team = []
+            try:
+                df_existing_check = conn.read(worksheet="UGRP_DB", ttl=0)
+                if not df_existing_check.empty and "member_email" in df_existing_check.columns:
+                    other_teams_df = df_existing_check[df_existing_check["id"] != leader_id]
+                    taken_emails = other_teams_df["member_email"].astype(str).tolist()
+                    for email in team_emails_input:
+                        if email and email in taken_emails:
+                            already_in_other_team.append(email)
+            except:
+                pass
+
+            if already_in_other_team:
+                return f"taken_email:{', '.join(already_in_other_team)}"
+
+            try:
+                df_new = pd.DataFrame(team_members_data)
+                try:
+                    df_existing = conn.read(worksheet="UGRP_DB", ttl=0)
+                    if not df_existing.empty and "id" in df_existing.columns:
+                        df_existing = df_existing[df_existing["id"] != leader_id]
+                        df_final = pd.concat([df_existing, df_new], ignore_index=True)
+                    else:
+                        df_final = df_new
+                except:
+                    df_final = df_new
+
+                conn.update(worksheet="UGRP_DB", data=df_final)
+                return "success"
+            except Exception as e:
+                return f"db_error:{e}"
+
+        if submitted:
+            res = process_ugrp_save()
+            if res == "empty_error":
+                st.error("🚨 정해진 팀원 수만큼 모든 문항(이메일, 희망 주제, 자기 PR 등)을 빠짐없이 채워주세요!")
+            elif res.startswith("invalid_email:"):
+                st.error(f"🚨 시스템에 가입되지 않은 이메일입니다: {res.split(':')[1]}")
+            elif res.startswith("taken_email:"):
+                st.error(f"🚨 이미 다른 팀에 소속된 팀원입니다: {res.split(':')[1]}")
+            elif res == "success":
+                st.success("🎉 UGRP 팀 정보가 완벽하게 저장되었습니다!")
+            else:
+                st.error(f"저장 중 에러 발생: {res}")
+
+        if ugrp_match_clicked:
+            res = process_ugrp_save()
+            if res != "success":
+                st.error("🚨 AI 추천을 받으려면 먼저 팀 정보를 올바르게 작성하고 저장 조건(이메일 검증 및 빈칸 없음)을 만족해야 합니다!")
+            else:
+                try:
+                    df_all_ugrp = conn.read(worksheet="UGRP_DB", ttl=0)
+                    # 내 팀원들 행 제외하고 다른 팀장들 추출
+                    other_teams_raw = df_all_ugrp[df_all_ugrp["id"] != leader_id]
+
+                    if other_teams_raw.empty:
+                        st.warning("현재 매칭을 구하고 있는 다른 UGRP 팀이 충분하지 않습니다.")
+                    else:
+                        # 팀별 인원수를 계산하여 합산 시 6명이 넘지 않는 팀들만 필터링
+                        my_team_count = len(team_members_data)
+                        valid_other_leader_ids = []
+
+                        for oid, group in other_teams_raw.groupby("id"):
+                            other_team_count = len(group)
+                            if my_team_count + other_team_count <= 6:
+                                valid_other_leader_ids.append(oid)
+
+                        filtered_other_teams = other_teams_raw[other_teams_raw["id"].isin(valid_other_leader_ids)]
+
+                        if filtered_other_teams.empty:
+                            st.warning("합병 시 총인원이 6명 이하인 조건에 부합하는 다른 팀이 없습니다.")
+                        else:
+                            api_key = st.secrets.get("GEMINI_API_KEY", "")
+                            if not api_key:
+                                st.error("Gemini API 키가 secrets.toml에 설정되어 있지 않습니다.")
+                            else:
+                                with st.spinner("🤖 Gemini AI가 최적의 UGRP 연구 시너지 팀을 분석 중입니다..."):
+                                    my_team_summary_str = f"우리 팀 인원: {my_team_count}명, 팀장: {leader_name_default}, 팀 PR: {team_pr_input}, 구성원 상세:\n" + pd.DataFrame(
+                                        team_members_data).to_string()
+                                    result_text = get_ugrp_ai_recommendation_cached(
+                                        my_team_summary_str, filtered_other_teams.to_string(), api_key
+                                    )
+
+                                st.session_state.ugrp_ai_raw_text = result_text
+
+                                parsed_cards = []
+                                lines = result_text.strip().split("\n")
+
+                                for i, line in enumerate(lines[:5]):
+                                    parts = line.split(" ", 2)
+                                    cand_name = parts[0] if len(parts) >= 0 else f"다른 팀 {i + 1}"
+
+                                    # 해당 팀장의 데이터 그룹 추출
+                                    matched_group = filtered_other_teams[
+                                        filtered_other_teams["leader_name"].astype(str).str.contains(cand_name,
+                                                                                                     na=False) |
+                                        filtered_other_teams["id"].astype(str).str.contains(cand_name, na=False)
+                                        ]
+                                    if matched_group.empty:
+                                        # 첫 번째 유효한 팀장 ID로 대체 시도
+                                        unique_ids = filtered_other_teams["id"].unique()
+                                        if i < len(unique_ids):
+                                            matched_group = filtered_other_teams[
+                                                filtered_other_teams["id"] == unique_ids[i]]
+
+                                    team_details = matched_group.to_dict(
+                                        orient="records") if not matched_group.empty else []
+                                    team_leader_name = team_details[0].get("leader_name",
+                                                                           "연구팀장") if team_details else "연구팀장"
+                                    team_leader_email = team_details[0].get("id",
+                                                                            "team@dgist.ac.kr") if team_details else "team@dgist.ac.kr"
+                                    team_pr_desc = team_details[0].get("team_pr",
+                                                                       "등록된 팀 PR이 없습니다.") if team_details else "등록된 팀 PR이 없습니다."
+
+                                    if len(parts) >= 3:
+                                        parsed_cards.append({
+                                            "name": f"{team_leader_name} 팀",
+                                            "email": team_leader_email,
+                                            "desc": parts[2],
+                                            "team_pr": team_pr_desc,
+                                            "details": team_details,
+                                        })
+                                    else:
+                                        parsed_cards.append({
+                                            "name": f"연구팀 {i + 1}",
+                                            "email": team_leader_email,
+                                            "desc": line,
+                                            "team_pr": team_pr_desc,
+                                            "details": team_details,
+                                        })
+
+                                st.session_state.ugrp_ai_cards_data = parsed_cards
+                                st.session_state.page = "ugrp_result"
+                                st.rerun()
+
+                except Exception as e:
+                    st.error(f"UGRP 추천 처리 중 오류가 발생했습니다: {e}")
+
     if st.button("← 홈으로 돌아가기"):
         st.session_state.page = "home"
         st.rerun()
+
+
+# --- UGRP 후보 세부정보 다이얼로그 팝업 함수 ---
+@st.dialog("📋 UGRP 추천 연구팀 상세 프로필")
+def show_ugrp_detail_dialog(c):
+    st.subheader(f"🔬 {c['name']} 상세 정보")
+    st.write(f"📧 **대표 팀장 이메일:** {c['email']}")
+    st.markdown(f"🏆 **팀 전체 PR:** \"{c.get('team_pr', '정보 없음')}\"")
+    st.write("---")
+
+    details = c.get("details", [])
+    if details:
+        st.markdown("### 👥 팀원 구성 및 연구 성향")
+        for idx, member in enumerate(details):
+            with st.expander(f"👤 {idx + 1}번 멤버 ({member.get('member_email', '이메일 없음')})"):
+                col_ud1, col_ud2 = st.columns(2)
+                with col_ud1:
+                    st.write(f"- **성별:** {member.get('gender', '정보 없음')}")
+                    st.write(f"- **트랙:** {member.get('track', '정보 없음')}")
+                    st.write(f"- **투자 시간:** {member.get('available_time', '정보 없음')}")
+                with col_ud2:
+                    st.write(f"- **희망 주제:** {member.get('topic', '정보 없음')}")
+                    st.write(f"- **선호 성별:** {member.get('pref_gender', '정보 없음')}")
+                    st.write(f"- **선호 트랙:** {member.get('preferred_tracks', '정보 없음')}")
+                st.info(f"**개인 자기 PR:** {member.get('pr', '작성된 내용이 없습니다.')}")
+    else:
+        st.info("해당 팀의 상세 구성원 데이터가 없습니다.")
+
+    if st.button("닫기", use_container_width=True, key="close_ugrp_dialog"):
+        st.rerun()
+
+
+# --- UGRP 추천 결과 화면 ---
+def show_ugrp_result():
+    st.markdown(theme_css, unsafe_allow_html=True)
+    st.markdown(
+        "<div class='dgist-logo'>ugrp<span>.</span>result</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<h2 style='color:#1E293B; font-weight:800;"
+        f" margin-top:0.5rem;'>{st.session_state.get('username', '사용자')}님의"
+        " 팀을 위한 최적의 UGRP 연구팀 추천 리스트 (합산 최대 6명)</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='color:#64748B; margin-bottom: 2rem;'>Gemini AI가 연구 주제 방향성과 팀 PR 시너지를 분석하여 선정한 상위 추천 연구팀 프로필입니다.</p>",
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("✨ Gemini AI UGRP 심층 분석 리포트 전체 보기", expanded=False):
+        st.write(st.session_state.get("ugrp_ai_raw_text", ""))
+
+    st.markdown("<div style='margin-top: 1.5rem;'></div>", unsafe_allow_html=True)
+
+    cards = st.session_state.get("ugrp_ai_cards_data", [])
+    if not cards:
+        st.warning("표시할 추천 UGRP 데이터가 없습니다. 다시 시도해 주세요.")
+    else:
+        cols = st.columns(len(cards) if len(cards) <= 5 else 5, gap="small")
+        for idx, c in enumerate(cards):
+            if idx < len(cols):
+                with cols[idx]:
+                    st.markdown(
+                        f"""
+                        <div style='font-size: 1.15rem; font-weight: 800; color: #1E293B; margin-bottom: 0.2rem;'>{c['name']}</div>
+                        <div style='color: #3D6098; font-size: 0.72rem; font-weight: 700; margin-bottom: 0.8rem; word-break: break-all;'>{c['email']}</div>
+                        <div style='color: #475569; font-size: 0.82rem; line-height: 1.4; margin-bottom: 1rem; min-height: 5.2em;'>"{c['desc']}"</div>
+                    """,
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("팀 세부정보 보기", key=f"ugrp_detail_btn_{idx}"):
+                        show_ugrp_detail_dialog(c)
+
+    st.markdown("<div style='margin-top: 2.5rem;'></div>", unsafe_allow_html=True)
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        if st.button("← UGRP 팀 입력 화면으로"):
+            st.session_state.page = "ugrp"
+            st.rerun()
+    with col_b2:
+        if st.button("🏠 메인 홈으로 돌아가기"):
+            st.session_state.page = "home"
+            st.rerun()
 
 
 # --- 3. 룸메이트 입력 및 AI 추천 화면 ---
@@ -198,7 +631,7 @@ def get_ai_recommendation_cached(user_info_str, others_info_str, api_key):
     아래는 현재 로그인한 사용자의 프로필 및 선호 조건입니다:
     {user_info_str}
 
-    아래는 데이터베이스에 등록된 다른 사용자들의 프로필 목록입니다:
+    아래는 데이터베이스에 등록된 다른 사용자들의 프로필 목록입니다 (현재 '구함' 상태인 사용자들만 필터링됨):
     {others_info_str}
 
     조건:
@@ -647,8 +1080,10 @@ def show_roommate_search():
             )
 
         def create_new_data():
+            current_status = st.session_state.get("matching_status", "구함")
             return {
                 "id": current_id,
+                "matching_status": current_status,
                 "my_gender": my_gender,
                 "my_smoke": my_smoke,
                 "my_sleep_time": my_sleep_time,
@@ -667,7 +1102,7 @@ def show_roommate_search():
                 "my_drink": my_drink,
                 "my_drink_habit_yn": my_drink_habit_yn,
                 "my_fridge": my_fridge,
-                "my_name": current_name,  # 시트 첫 번째 페이지 로그인 정보에서 가져온 정확한 이름!
+                "my_name": current_name,
                 "my_age": my_age,
                 "my_grade": my_grade,
                 "my_hobby": my_hobby,
@@ -742,9 +1177,15 @@ def show_roommate_search():
                 conn.update(worksheet="Roommate_DB", data=updated_df)
 
                 other_users_df = updated_df[updated_df["id"] != current_id]
+                if "matching_status" in other_users_df.columns:
+                    other_users_df = other_users_df[
+                        other_users_df["matching_status"].astype(str) == "구함"
+                        ]
+
                 if other_users_df.empty or len(other_users_df) < 1:
                     st.warning(
-                        "비어있습니다 (매칭 가능한 다른 사용자가 충분하지 않습니다)"
+                        "비어있습니다 (현재 매칭을 구하고 있는 다른 사용자가 충분하지"
+                        " 않습니다)"
                     )
                 else:
                     api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -752,7 +1193,6 @@ def show_roommate_search():
                         st.error("Gemini API 키가 secrets.toml에 설정되어 있지 않습니다.")
                     else:
                         with st.spinner("🤖 Gemini AI가 최적의 룸메이트를 분석 중입니다..."):
-                            # AI 추천 함수 호출 (요청하신 대로 [이름] [이메일] [추천이유] 포맷 적용)
                             result_text = get_ai_recommendation_cached(
                                 str(new_data), other_users_df.to_string(), api_key
                             )
@@ -896,11 +1336,65 @@ def show_result():
             st.rerun()
 
 
-# --- 5. 메인 네비게이션 및 로그인 분기 ---
+# --- 5. 사이드바 토글 상태 변경 시 실시간 DB 반영 함수 ---
+def update_matching_status_in_db():
+    current_id = st.session_state.get("id", "")
+    if not current_id:
+        return
+
+    new_status = st.session_state.get("matching_toggle_state", True)
+    status_str = "구함" if new_status else "구함 완료"
+    st.session_state["matching_status"] = status_str
+
+    try:
+        conn, _ = get_database()
+        if conn is None:
+            return
+        existing_data = conn.read(worksheet="Roommate_DB", ttl=0)
+
+        if (
+                existing_data is not None
+                and not existing_data.empty
+                and "id" in existing_data.columns
+        ):
+            if "matching_status" not in existing_data.columns:
+                existing_data["matching_status"] = "구함"
+            existing_data["matching_status"] = existing_data[
+                "matching_status"
+            ].astype(str)
+
+            if current_id in existing_data["id"].values:
+                existing_data.loc[
+                    existing_data["id"] == current_id, "matching_status"
+                ] = status_str
+                conn.update(worksheet="Roommate_DB", data=existing_data)
+                if status_str == "구함":
+                    st.sidebar.success("🟢 구함 상태로 변경되었습니다.")
+                else:
+                    st.sidebar.warning("🔴 구함 완료로 변경되었습니다.")
+    except Exception as e:
+        st.sidebar.error(f"상태 업데이트 실패: {e}")
+
+
+# --- 6. 메인 네비게이션 및 로그인 분기 ---
 def main_page():
     with st.sidebar:
         username = st.session_state.get("username", "사용자")
         st.title(f"반갑습니다,\n**{username}**님! 👋")
+        st.write("---")
+
+        st.subheader("💡 룸메이트 매칭 상태")
+        st.toggle(
+            "룸메이트 구하는 중",
+            value=True,
+            key="matching_toggle_state",
+            on_change=update_matching_status_in_db,
+            help=(
+                "토글을 끄거나 켜면 즉시 구글 시트 DB에 반영되며, 다른 사람의 AI"
+                " 추천 목록 반영 여부가 결정됩니다."
+            ),
+        )
+
         st.write("---")
         st.subheader("📌 메뉴 이동")
 
@@ -925,6 +1419,8 @@ def main_page():
         show_home()
     elif st.session_state.page == "ugrp":
         show_ugrp_search()
+    elif st.session_state.page == "ugrp_result":
+        show_ugrp_result()
     elif st.session_state.page == "roommate":
         show_roommate_search()
     elif st.session_state.page == "result":
@@ -950,8 +1446,8 @@ def login_page():
                 db_pw = str(user_info["password"]).replace(".0", "").strip()
                 if db_pw == str(login_pw).strip():
                     st.session_state["logged_in"] = True
-                    st.session_state["username"] = str(user_info["name"])  # 이름 저장!
-                    st.session_state["id"] = login_id  # 이메일 저장!
+                    st.session_state["username"] = str(user_info["name"])
+                    st.session_state["id"] = login_id
                     st.success("로그인 성공!")
                     st.rerun()
                 else:
