@@ -1,0 +1,23 @@
+# 🚨 보안 및 API 키 (절대 업로드 금지)
+.streamlit/secrets.toml
+.env
+
+# 📦 가상 환경 폴더# 가장 최근 커밋을 취소 (코드는 지워지지 않음)
+            #git reset --soft HEAD^
+            #
+            ## .streamlit/secrets.toml은 제외하고 나머지 안전한 파일들만 다시 담기
+            #git add .
+            #
+            ## 다시 커밋
+            #git commit -m "시크릿 파일 제외하고 보안 설정 완료"got
+venv/
+.venv/
+env/
+
+# 🗑️ 파이썬 캐시 및 찌꺼기 파일
+__pycache__/
+*.pyc
+*.pyo
+
+# 🍎 Mac/OS 시스템 파일
+.DS_Store

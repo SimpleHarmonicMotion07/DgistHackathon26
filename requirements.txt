@@ -1,0 +1,5 @@
+streamlit
+st-gsheets-connection
+google-generativeai>=0.7.0
+pandas
+streamlit-option-menu
