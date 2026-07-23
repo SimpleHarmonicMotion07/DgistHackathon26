@@ -13,6 +13,8 @@ if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "username" not in st.session_state:
     st.session_state["username"] = ""
+if "id" not in st.session_state:
+    st.session_state["id"] = ""
 if "page" not in st.session_state:
     st.session_state.page = "home"
 if "match_type" not in st.session_state:
@@ -20,7 +22,7 @@ if "match_type" not in st.session_state:
 if "ai_cards_data" not in st.session_state:
     st.session_state.ai_cards_data = []
 if "ai_raw_text" not in st.session_state:
-    st.session_state.ai_raw_text = []
+    st.session_state.ai_raw_text = ""
 
 
 # 2. DB 연결 함수
@@ -186,7 +188,7 @@ def show_ugrp_search():
         st.rerun()
 
 
-# --- 3. 룸메이트 입력 및 AI 추천 화면 (모든 설문 내용 100% 보존) ---
+# --- 3. 룸메이트 입력 및 AI 추천 화면 ---
 @st.cache_data(show_spinner=False)
 def get_ai_recommendation_cached(user_info_str, others_info_str, api_key):
     genai.configure(api_key=api_key)
@@ -204,7 +206,6 @@ def get_ai_recommendation_cached(user_info_str, others_info_str, api_key):
     2. 각 추천 사람별 출력 포맷은 반드시 아래와 같이 한 줄씩 작성해주세요:
     [이름] [이메일/아이디] [추천 이유 요약]
     예시: 삼건우 shin_kunwoo@university.ac.kr 흡연하지 않고 음주 습관이 없으며 패턴이 잘 부합합니다.
-    주의!!!!!! 절대절대절대 정보 외 다른 텍스트를 표시하지 마시오.
     """
     response = model.generate_content(prompt)
     return response.text
@@ -218,12 +219,8 @@ def show_roommate_search():
     )
 
     conn = st.connection("gsheets", type=GSheetsConnection)
-    current_id = st.session_state.get(
-        "id", st.session_state.get("username", "unknown_user")
-    )
-    current_name = st.session_state.get(
-        "name", st.session_state.get("username", "알수없음")
-    )
+    current_id = st.session_state.get("id", "unknown_user")
+    current_name = st.session_state.get("username", "알수없음")
 
     saved_data = {}
     try:
@@ -670,7 +667,7 @@ def show_roommate_search():
                 "my_drink": my_drink,
                 "my_drink_habit_yn": my_drink_habit_yn,
                 "my_fridge": my_fridge,
-                "my_name": current_name,
+                "my_name": current_name,  # 시트 첫 번째 페이지 로그인 정보에서 가져온 정확한 이름!
                 "my_age": my_age,
                 "my_grade": my_grade,
                 "my_hobby": my_hobby,
@@ -755,6 +752,7 @@ def show_roommate_search():
                         st.error("Gemini API 키가 secrets.toml에 설정되어 있지 않습니다.")
                     else:
                         with st.spinner("🤖 Gemini AI가 최적의 룸메이트를 분석 중입니다..."):
+                            # AI 추천 함수 호출 (요청하신 대로 [이름] [이메일] [추천이유] 포맷 적용)
                             result_text = get_ai_recommendation_cached(
                                 str(new_data), other_users_df.to_string(), api_key
                             )
@@ -766,10 +764,11 @@ def show_roommate_search():
 
                         for i, line in enumerate(lines[:5]):
                             parts = line.split(" ", 2)
-                            # 후보 이름으로 시트에서 해당 유저의 상세 설문 데이터 찾기
                             candidate_name = parts[0] if len(parts) >= 0 else f"후보 {i + 1}"
                             matched_row = other_users_df[
-                                other_users_df["my_name"].astype(str).str.contains(candidate_name, na=False)
+                                other_users_df["my_name"]
+                                .astype(str)
+                                .str.contains(candidate_name, na=False)
                             ]
                             user_details = (
                                 matched_row.iloc[0].to_dict()
@@ -813,7 +812,7 @@ def show_detail_dialog(c):
 
     details = c.get("details", {})
     if details:
-        st.markdown("### 🔹 생활 패턴 및 특성")
+        st.markdown("### 🔹 라이프스타일 및 특성")
         col_d1, col_d2 = st.columns(2)
         with col_d1:
             st.write(f"- **나이:** {details.get('my_age', '정보 없음')}")
@@ -829,7 +828,7 @@ def show_detail_dialog(c):
             st.write(f"- **에어컨 온도:** {details.get('my_ac_temp', '정보 없음')}℃")
             st.write(f"- **취미:** {details.get('my_hobby', '정보 없음')}")
 
-        st.markdown("### 📝 기타 사항")
+        st.markdown("### 📝 자기 PR 및 기타 사항")
         st.info(
             details.get("my_pr", "작성된 자기 PR 내용이 없습니다.")
             if details.get("my_pr")
@@ -842,7 +841,7 @@ def show_detail_dialog(c):
         st.rerun()
 
 
-# --- 4. 추천 결과 화면 (퍼센트 제거 및 세부정보 보기 버튼 적용) ---
+# --- 4. 추천 결과 화면 ---
 def show_result():
     st.markdown(theme_css, unsafe_allow_html=True)
     st.markdown(
@@ -861,7 +860,6 @@ def show_result():
         unsafe_allow_html=True,
     )
 
-    # AI 원본 심층 분석 토글 박스
     with st.expander("✨ Gemini AI 심층 분석 리포트 전체 보기", expanded=False):
         st.write(st.session_state.ai_raw_text)
 
@@ -883,7 +881,6 @@ def show_result():
                     """,
                         unsafe_allow_html=True,
                     )
-                    # 세부정보 보기 버튼 (클릭 시 팝업 다이얼로그 호출)
                     if st.button("세부정보 보기", key=f"detail_btn_{idx}"):
                         show_detail_dialog(c)
 
@@ -921,6 +918,7 @@ def main_page():
         if st.button("로그아웃", use_container_width=True):
             st.session_state["logged_in"] = False
             st.session_state["username"] = ""
+            st.session_state["id"] = ""
             st.rerun()
 
     if st.session_state.page == "home":
@@ -952,8 +950,8 @@ def login_page():
                 db_pw = str(user_info["password"]).replace(".0", "").strip()
                 if db_pw == str(login_pw).strip():
                     st.session_state["logged_in"] = True
-                    st.session_state["username"] = str(user_info["name"])
-                    st.session_state["id"] = login_id
+                    st.session_state["username"] = str(user_info["name"])  # 이름 저장!
+                    st.session_state["id"] = login_id  # 이메일 저장!
                     st.success("로그인 성공!")
                     st.rerun()
                 else:
