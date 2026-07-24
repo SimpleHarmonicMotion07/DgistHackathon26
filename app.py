@@ -30,7 +30,6 @@ if "ugrp_ai_raw_text" not in st.session_state:
 
 
 # 2. DB 연결 함수
-@st.cache_data(ttl=60)
 def get_database():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
