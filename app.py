@@ -196,6 +196,7 @@ def get_ugrp_ai_recommendation_cached(my_team_str, other_teams_str, api_key):
     2. 각 추천 팀별 출력 포맷은 반드시 아래와 같이 한 줄씩 작성해주세요:
     [팀장닉네임/이름] [팀장아이디/이메일] [추천 및 합병 시너지 이유 요약]
     예시: 홍길동 leader1@dgist.ac.kr AI 기반 헬스케어 주제가 일치하며 인원 합병 시 완벽한 시너지가 기대됩니다.
+    정보를 전달하는 텍스트 이외의 텍스트들은 출력을 금지합니다.
     """
     response = model.generate_content(prompt)
     return response.text
@@ -639,6 +640,7 @@ def get_ai_recommendation_cached(user_info_str, others_info_str, api_key):
     2. 각 추천 사람별 출력 포맷은 반드시 아래와 같이 한 줄씩 작성해주세요:
     [이름] [이메일/아이디] [추천 이유 요약]
     예시: 삼건우 shin_kunwoo@university.ac.kr 흡연하지 않고 음주 습관이 없으며 패턴이 잘 부합합니다.
+    정보를 전달하는 텍스트 이외의 텍스트들은 출력을 금지합니다.
     """
     response = model.generate_content(prompt)
     return response.text
