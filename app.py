@@ -1163,8 +1163,10 @@ def show_roommate_search():
 
         if matched_clicked:
             try:
+                # 1. 데이터를 시트에 자동 저장
                 new_data = create_new_data()
                 existing_data = conn.read(worksheet="Roommate_DB", ttl=0)
+
                 if existing_data is None or existing_data.empty:
                     updated_df = pd.DataFrame([new_data])
                 else:
@@ -1178,6 +1180,7 @@ def show_roommate_search():
                     )
                 conn.update(worksheet="Roommate_DB", data=updated_df)
 
+                # 2. 다른 사용자 필터링 (구함 상태인 유저만)
                 other_users_df = updated_df[updated_df["id"] != current_id]
                 if "matching_status" in other_users_df.columns:
                     other_users_df = other_users_df[
@@ -1186,52 +1189,75 @@ def show_roommate_search():
 
                 if other_users_df.empty or len(other_users_df) < 1:
                     st.warning(
-                        "비어있습니다 (현재 매칭을 구하고 있는 다른 사용자가 충분하지"
-                        " 않습니다)"
+                        "비어있습니다 (현재 매칭을 구하고 있는 다른 사용자가 충분하지 않습니다)"
                     )
                 else:
                     api_key = st.secrets.get("GEMINI_API_KEY", "")
                     if not api_key:
                         st.error("Gemini API 키가 secrets.toml에 설정되어 있지 않습니다.")
                     else:
+                        # 3. 프롬프트 밀림 방지를 위한 명확한 구조표(라벨 블록) 생성
+                        others_info_list = []
+                        for idx, row in other_users_df.iterrows():
+                            row_str = (
+                                f"- 이름: {row.get('my_name', '알수없음')} | "
+                                f"이메일: {row.get('id', '')} | "
+                                f"성별: {row.get('my_gender', '')} | "
+                                f"흡연: {row.get('my_smoke', '')} | "
+                                f"취침: {row.get('my_sleep_time', '')} | "
+                                f"군필: {row.get('my_military', '')} | "
+                                f"청소: {row.get('my_clean', '')} | "
+                                f"자기PR: {row.get('my_pr', '')}"
+                            )
+                            others_info_list.append(row_str)
+                        others_info_str = "\n".join(others_info_list)
+
+                        user_info_str = str(new_data)
+
                         with st.spinner("🤖 Gemini AI가 최적의 룸메이트를 분석 중입니다..."):
                             result_text = get_ai_recommendation_cached(
-                                str(new_data), other_users_df.to_string(), api_key
+                                user_info_str, others_info_str, api_key
                             )
 
                         st.session_state.ai_raw_text = result_text
 
+                        # 4. 결과 파싱 및 데이터 맵핑 안정화
                         parsed_cards = []
-                        lines = result_text.strip().split("\n")
+                        lines = [line.strip() for line in result_text.strip().split("\n") if line.strip()]
 
                         for i, line in enumerate(lines[:5]):
-                            parts = line.split(" ", 2)
-                            candidate_name = parts[0] if len(parts) >= 0 else f"후보 {i + 1}"
+                            # 정규식 패턴을 이용해 [이름] [이메일] [설명] 구조 안전하게 추출
+                            match = re.match(r"^\[(.*?)\]\s*([\w\.-]+@[\w\.-]+\.\w+)\s+(.*)$", line)
+
+                            if match:
+                                c_name = match.group(1).strip()
+                                c_email = match.group(2).strip()
+                                c_desc = match.group(3).strip()
+                            else:
+                                # 포맷이 미세하게 다를 경우를 대비한 대체 분해
+                                parts = line.split(" ", 2)
+                                c_name = parts[0] if len(parts) > 0 else f"후보 {i + 1}"
+                                c_email = parts[1] if len(parts) > 1 else "contact@university.ac.kr"
+                                c_desc = parts[2] if len(parts) > 2 else line
+
+                            # 이메일 혹은 이름으로 실제 데이터베이스 행 매칭
                             matched_row = other_users_df[
-                                other_users_df["my_name"]
-                                .astype(str)
-                                .str.contains(candidate_name, na=False)
-                            ]
+                                (other_users_df["id"].astype(str) == c_email) |
+                                (other_users_df["my_name"].astype(str) == c_name)
+                                ]
+
                             user_details = (
                                 matched_row.iloc[0].to_dict()
                                 if not matched_row.empty
                                 else {}
                             )
 
-                            if len(parts) >= 3:
-                                parsed_cards.append({
-                                    "name": parts[0],
-                                    "email": parts[1],
-                                    "desc": parts[2],
-                                    "details": user_details,
-                                })
-                            else:
-                                parsed_cards.append({
-                                    "name": f"후보 {i + 1}",
-                                    "email": "contact@university.ac.kr",
-                                    "desc": line,
-                                    "details": user_details,
-                                })
+                            parsed_cards.append({
+                                "name": c_name,
+                                "email": c_email,
+                                "desc": c_desc,
+                                "details": user_details,
+                            })
 
                         st.session_state.ai_cards_data = parsed_cards
                         st.session_state.page = "result"
